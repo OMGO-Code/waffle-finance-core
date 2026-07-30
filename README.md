@@ -17,6 +17,7 @@
 
 ---
 
+
 ## What it is
 
 WaffleFinance locks funds in Hash Time-Lock Contracts (HTLCs) on each chain simultaneously. Settlement is a `sha256` preimage reveal — not a multisig, not an attester signature.
