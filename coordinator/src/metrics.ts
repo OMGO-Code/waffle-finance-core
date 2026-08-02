@@ -240,6 +240,98 @@ export const reconciliationEventsReplayed = new Counter({
   registers: [registry]
 });
 
+/**
+ * Events skipped during replay/reconciliation, by chain and reason.
+ *
+ * `reason` values:
+ *  - `already_applied`  — the event had already been recorded in the DB
+ *  - `stale_sequence`   — the incoming block/ledger/slot is older than what was last recorded
+ *  - `lower_priority`   — a live-path event already claimed this slot (same sequence, lower priority path)
+ *  - `order_not_found`  — the referenced hashlock/orderId has no matching order in the DB
+ *  - `preimage_mismatch`— the claimed preimage does not hash to the order's hashlock
+ */
+export const reconciliationEventsSkipped = new Counter({
+  name: "coordinator_reconciliation_events_skipped_total",
+  help: "Total on-chain events skipped during reconciliation, by chain and reason",
+  labelNames: ["chain", "reason"] as const,
+  registers: [registry],
+});
+
+/**
+ * Orders whose DB state disagrees with chain-history evidence.
+ *
+ * Emitted during the conflict-resolution pass when the chain reports an
+ * event (e.g. OrderRefunded) but the DB already has a conflicting terminal
+ * state (e.g. completed).  This counter is actionable: a non-zero rate
+ * warrants manual review of the named order.
+ *
+ * `conflict_type` values:
+ *  - `chain_ahead`   — chain says more progress than DB (normal catch-up scenario)
+ *  - `db_ahead`      — DB has a later-stage state than chain evidence supports
+ *  - `terminal_clash`— DB is terminal but chain shows a conflicting terminal event
+ */
+export const reconciliationConflicts = new Counter({
+  name: "coordinator_reconciliation_conflicts_total",
+  help: "Total order state conflicts detected during reconciliation, by chain and conflict type",
+  labelNames: ["chain", "conflict_type"] as const,
+  registers: [registry],
+});
+
+/**
+ * Block/ledger/slot gap detected at reconciliation startup vs. the last
+ * recorded processed position, by chain.
+ *
+ * A large gap after a restart is expected (the coordinator was offline);
+ * a large gap during steady-state operation indicates a stalled listener.
+ */
+export const reconciliationGapBlocks = new Gauge({
+  name: "coordinator_reconciliation_gap_blocks",
+  help: "Gap between last-processed and current chain tip at reconciliation start, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Lookback window actually covered by the most recent reconciliation pass,
+ * expressed in blocks/ledgers/slots, by chain.
+ *
+ * Allows operators to verify the reconciler is scanning a meaningful range
+ * after a restart (e.g. if the gap was 50 000 blocks but the lookback window
+ * is only 14 400, some events may have been permanently missed).
+ */
+export const reconciliationLookbackCoverage = new Gauge({
+  name: "coordinator_reconciliation_lookback_coverage_blocks",
+  help: "Number of blocks/ledgers/slots covered by the most recent reconciliation lookback window, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Recovery events processed by restart-recovery path, by chain.
+ *
+ * Incremented once per on-chain event successfully applied during the
+ * post-restart catch-up window (gap > normal lookback).  Distinct from
+ * `reconciliation_events_replayed_total` which covers steady-state replay.
+ */
+export const reconciliationRestartRecoveryEvents = new Counter({
+  name: "coordinator_reconciliation_restart_recovery_events_total",
+  help: "Total events applied during post-restart gap recovery, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
+/**
+ * Ambiguous order states detected: orders whose current DB status cannot be
+ * deterministically confirmed against chain history (e.g. appears in two
+ * different terminal states across listeners).  Requires manual operator action.
+ */
+export const reconciliationAmbiguousStates = new Counter({
+  name: "coordinator_reconciliation_ambiguous_states_total",
+  help: "Orders whose state could not be deterministically resolved during reconciliation, by chain",
+  labelNames: ["chain"] as const,
+  registers: [registry],
+});
+
 /** Dispatch outcomes for live/replay/recovery event paths */
 export const workflowDispatchDecisions = new Counter({
   name: "coordinator_workflow_dispatch_decisions_total",
@@ -259,14 +351,28 @@ export const staleCleanupRuns = new Counter({
 /** Orders archived (soft-deleted) by the stale cleanup service */
 export const staleOrdersArchived = new Counter({
   name: "coordinator_stale_orders_archived_total",
-  help: "Total stale announced orders archived by the cleanup service",
+  help: "Total stale announced orders archived by the cleanup service (no src lock within retention window)",
   registers: [registry]
+});
+
+/**
+ * Orders skipped by stale cleanup because they already had an archived_at timestamp.
+ *
+ * Distinct from `staleOrdersArchived` — this counter captures re-runs landing
+ * on already-archived rows, which are excluded by the candidate query.  In
+ * normal operation this should always be zero; a non-zero value indicates
+ * the candidate query is returning already-archived rows.
+ */
+export const staleCleanupAlreadyArchivedSkipped = new Counter({
+  name: "coordinator_stale_cleanup_already_archived_skipped_total",
+  help: "Stale cleanup passes that found orders already archived (indicates candidate query drift)",
+  registers: [registry],
 });
 
 /** Unix timestamp of the last completed stale cleanup run */
 export const staleCleanupLastRun = new Gauge({
   name: "coordinator_stale_cleanup_last_run_timestamp_seconds",
-  help: "Unix timestamp of the most recent stale order cleanup run",
+  help: "Unix timestamp of the most recent stale order cleanup run (archival of orphaned announced orders)",
   registers: [registry]
 });
 
@@ -290,6 +396,36 @@ export const expiryScanRuns = new Counter({
 export const ordersExpiredTotal = new Counter({
   name: "coordinator_orders_expired_total",
   help: "Total orders marked expired by the periodic timelock scan",
+  registers: [registry],
+});
+
+/**
+ * Orders skipped by expireStaleOrders because they were already in the
+ * `expired` state when the scan ran.
+ *
+ * Distinct from `ordersExpiredTotal` — this counter captures idempotent
+ * no-op skips (already expired) rather than newly-expired transitions.
+ * A high ratio of skipped:expired indicates the scan is running more
+ * frequently than orders are being resolved or refunded after expiry.
+ */
+export const ordersExpiredSkippedTotal = new Counter({
+  name: "coordinator_orders_expired_skipped_total",
+  help: "Orders skipped by the expiry scan because they were already in the expired state",
+  registers: [registry],
+});
+
+/**
+ * Orders skipped by expireStaleOrders because they are in a terminal state
+ * (completed / refunded / failed) that cannot be expired.
+ *
+ * Distinct from stale-cleanup, which operates on announced-only orders.
+ * This counter represents timelock-scan candidates that were already settled,
+ * and is expected to be zero in normal operation (the candidate query should
+ * filter these out).  A non-zero count indicates a query correctness issue.
+ */
+export const ordersExpiredTerminalSkippedTotal = new Counter({
+  name: "coordinator_orders_expired_terminal_skipped_total",
+  help: "Orders skipped by the expiry scan because they are already in a terminal state",
   registers: [registry],
 });
 

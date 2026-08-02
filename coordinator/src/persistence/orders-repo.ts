@@ -749,6 +749,48 @@ export class OrdersRepository {
   }
 
   /**
+   * Return the last position (block/ledger/slot) that the reconciler has
+   * confirmed it fully processed for `chain`.  Returns 0 if the reconciler
+   * has never run for this chain (no row in chain_cursors).
+   *
+   * This is the persistent counterpart to `getLastProcessedBlock()`.
+   * `getLastProcessedBlock()` derives a position from existing order data,
+   * which only advances when an order transitions — blocks with no relevant
+   * events are invisible to it.  `getChainCursor()` returns the value
+   * explicitly written by `setChainCursor()` so it reflects every scanned
+   * block, not just blocks that contained orders.
+   */
+  async getChainCursor(chain: Chain): Promise<number> {
+    const row = await this.get<{ position: number }>(
+      this.db.prepare("SELECT position FROM chain_cursors WHERE chain = ?"),
+      chain
+    );
+    return row?.position ?? 0;
+  }
+
+  /**
+   * Record that the reconciler has fully processed all events up to and
+   * including `position` for `chain`.
+   *
+   * The update is an UPSERT so callers don't have to check whether a row
+   * exists.  We only advance the cursor forward — if the incoming position
+   * is less than the stored position (e.g. a parallel reconciler ran
+   * concurrently), we leave the stored value unchanged.
+   */
+  async setChainCursor(chain: Chain, position: number): Promise<void> {
+    await this.run(
+      this.db.prepare(`
+        INSERT INTO chain_cursors (chain, position, updated_at)
+        VALUES (?, ?, CAST(strftime('%s','now') AS INTEGER))
+        ON CONFLICT(chain) DO UPDATE
+          SET position   = MAX(chain_cursors.position, excluded.position),
+              updated_at = excluded.updated_at
+      `),
+      chain, position
+    );
+  }
+
+  /**
    * Return orders in `src_locked` or `dst_locked` whose relevant timelock
    * has already passed (timelock < nowSeconds).  These are candidates for
    * the periodic expiry scan.

@@ -50,7 +50,7 @@ pieces fit together, not how to work in any one of them.
    │         On-chain settlement (source of truth)             │
    │  contracts/  HTLCEscrow.sol + ResolverRegistry.sol (EVM)   │
    │  soroban/    wafflefinance-htlc + resolver-registry (XLM)  │
-   │  Anchor HTLC program (Solana — pending deployment)         │
+   │  Anchor HTLC program (Solana — deployed on devnet)            │
    └─────────────────────────────────────────────────────────┘
 ```
 
@@ -77,7 +77,7 @@ Two things this diagram is trying to make explicit:
 | --- | --- | --- | --- |
 | Ethereum | `HTLCEscrow.sol` + `ResolverRegistry.sol` | Solidity 0.8.24 (Hardhat + Foundry) | `sha256(preimage) == hashlock` before `timelock` → pay `beneficiary`; timelock expired → anyone calls `refundOrder` |
 | Stellar | `wafflefinance-htlc` + `wafflefinance-resolver-registry` | Rust / Soroban SDK 22.x | Same rule, Soroban host functions |
-| Solana | Anchor HTLC program | Rust / Anchor | Same rule; **pending devnet deployment** — SDK and coordinator run in simulation mode until then |
+| Solana | Anchor HTLC program | Rust / Anchor | Same rule, sha256 preimage reveal |
 
 There is no cross-chain messaging protocol, validator set, or attester.
 Each leg is an independent HTLC; the same `sha256` preimage unlocks both.

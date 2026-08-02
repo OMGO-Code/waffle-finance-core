@@ -133,40 +133,25 @@ describe("checkRoutePolicy — DIRECTION_UNSUPPORTED", () => {
   });
 });
 
-// ── checkRoutePolicy: DIRECTION_BLOCKED (Solana placeholder) ─────────────────
+// ── checkRoutePolicy: DIRECTION_BLOCKED ──────────────────────────────────────
 
 describe("checkRoutePolicy — DIRECTION_BLOCKED", () => {
-  it("blocks eth_to_sol because Solana is a placeholder chain", () => {
+  it("allows eth_to_sol now that Solana is live", () => {
     const verdict = checkRoutePolicy({
       direction: "eth_to_sol",
       srcChain: "ethereum",
       dstChain: "solana",
     });
-    expect(verdict.allowed).toBe(false);
-    expect((verdict as RouteDenial).code).toBe("DIRECTION_BLOCKED");
-    expect((verdict as RouteDenial).field).toBe("direction");
+    expect(verdict.allowed).toBe(true);
   });
 
-  it("blocks sol_to_eth because Solana is a placeholder chain", () => {
+  it("allows sol_to_eth now that Solana is live", () => {
     const verdict = checkRoutePolicy({
       direction: "sol_to_eth",
       srcChain: "solana",
       dstChain: "ethereum",
     });
-    expect(verdict.allowed).toBe(false);
-    expect((verdict as RouteDenial).code).toBe("DIRECTION_BLOCKED");
-  });
-
-  it("includes the placeholder reason in the denial so operators understand why", () => {
-    const verdict = checkRoutePolicy({
-      direction: "eth_to_sol",
-      srcChain: "ethereum",
-      dstChain: "solana",
-    });
-    expect(verdict.allowed).toBe(false);
-    // The reason should explain that Solana settlement is not yet implemented
-    expect((verdict as RouteDenial).reason.toLowerCase()).toContain("solana");
-    expect((verdict as RouteDenial).reason.toLowerCase()).toContain("not yet implemented");
+    expect(verdict.allowed).toBe(true);
   });
 
   it("every direction that touches a placeholder chain is blocked", () => {
@@ -282,16 +267,15 @@ describe("checkRoutePolicy — CHAIN_MISMATCH", () => {
 // ── Denial ordering: blocked before mismatch ─────────────────────────────────
 
 describe("checkRoutePolicy — denial ordering", () => {
-  it("DIRECTION_BLOCKED is returned even when the chains also mismatch, so the message is actionable", () => {
-    // eth_to_sol with wrong chains — the blocking reason (Solana placeholder)
-    // is more actionable than a chain-mismatch detail.
+  it("CHAIN_MISMATCH is returned when chains are wrong for a live direction", () => {
+    // eth_to_sol with wrong chains — CHAIN_MISMATCH should be returned.
     const verdict = checkRoutePolicy({
       direction: "eth_to_sol",
       srcChain: "stellar",   // also wrong
       dstChain: "ethereum",  // also wrong
     });
     expect(verdict.allowed).toBe(false);
-    expect((verdict as RouteDenial).code).toBe("DIRECTION_BLOCKED");
+    expect((verdict as RouteDenial).code).toBe("CHAIN_MISMATCH");
   });
 
   it("SAME_CHAIN_ROUTE is returned before CHAIN_MISMATCH for a same-chain live direction", () => {
@@ -315,34 +299,17 @@ describe("announceSchema — route-policy integration", () => {
     }
   });
 
-  it("rejects eth_to_sol with DIRECTION_BLOCKED and emits the routePolicyCode param", () => {
+  it("accepts eth_to_sol as a live direction", () => {
     const result = announceSchema.safeParse(validAnnounce("eth_to_sol"));
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      const issue = result.error.issues[0];
-      expect(issue.path).toContain("direction");
-      expect((issue.params as any)?.routePolicyCode).toBe("DIRECTION_BLOCKED");
-      expect(issue.message.toLowerCase()).toContain("solana");
-    }
+    expect(result.success).toBe(true);
   });
 
-  it("rejects sol_to_eth with DIRECTION_BLOCKED", () => {
+  it("accepts sol_to_eth as a live direction", () => {
     const result = announceSchema.safeParse(validAnnounce("sol_to_eth"));
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      expect((result.error.issues[0].params as any)?.routePolicyCode).toBe("DIRECTION_BLOCKED");
-    }
+    expect(result.success).toBe(true);
   });
 
-  it("emits exactly one issue on a blocked direction (no cascading errors)", () => {
-    // The z.NEVER early-return should suppress address-format issues.
-    const result = announceSchema.safeParse(validAnnounce("eth_to_sol"));
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      // Only one policy issue — no separate srcAddress / dstAddress issues
-      expect(result.error.issues.length).toBe(1);
-    }
-  });
+  it("emits exactly one issue on a mismatched direction (no cascading errors)", () => {
 
   it("rejects a mismatched srcChain with CHAIN_MISMATCH before running address checks", () => {
     const payload = {
@@ -402,9 +369,9 @@ describe("isLiveDirection", () => {
     }
   });
 
-  it("returns false for blocked directions (eth_to_sol, sol_to_eth)", () => {
-    expect(isLiveDirection("eth_to_sol")).toBe(false);
-    expect(isLiveDirection("sol_to_eth")).toBe(false);
+  it("returns true for all declared directions including Solana", () => {
+    expect(isLiveDirection("eth_to_sol")).toBe(true);
+    expect(isLiveDirection("sol_to_eth")).toBe(true);
   });
 
   it("returns false for unknown strings", () => {
@@ -435,44 +402,19 @@ describe("listLiveRoutes", () => {
     }
   });
 
-  it("includes eth_to_xlm and xlm_to_eth", () => {
+  it("includes eth_to_xlm, xlm_to_eth, eth_to_sol, and sol_to_eth", () => {
     const ids = listLiveRoutes().map((r) => r.direction);
     expect(ids).toContain("eth_to_xlm");
     expect(ids).toContain("xlm_to_eth");
-  });
-
-  it("does not include eth_to_sol or sol_to_eth", () => {
-    const ids = listLiveRoutes().map((r) => r.direction);
-    expect(ids).not.toContain("eth_to_sol");
-    expect(ids).not.toContain("sol_to_eth");
+    expect(ids).toContain("eth_to_sol");
+    expect(ids).toContain("sol_to_eth");
   });
 });
 
 describe("listBlockedRoutes", () => {
-  it("returns blocked directions with a non-empty reason", () => {
+  it("returns an empty list when no chains are placeholders", () => {
     const blocked = listBlockedRoutes();
-    expect(blocked.length).toBeGreaterThan(0);
-    for (const entry of blocked) {
-      expect(entry.reason.length).toBeGreaterThan(0);
-      expect(BLOCKED_DIRECTIONS.has(entry.direction)).toBe(true);
-    }
-  });
-
-  it("includes both Solana directions", () => {
-    const ids = listBlockedRoutes().map((r) => r.direction);
-    expect(ids).toContain("eth_to_sol");
-    expect(ids).toContain("sol_to_eth");
-  });
-
-  it("every entry's reason mentions the placeholder chain", () => {
-    for (const entry of listBlockedRoutes()) {
-      // The reason should explain which chain is not yet implemented
-      expect(
-        entry.reason.toLowerCase().includes("solana") ||
-          entry.reason.toLowerCase().includes("not yet") ||
-          entry.reason.toLowerCase().includes("placeholder")
-      ).toBe(true);
-    }
+    expect(blocked).toEqual([]);
   });
 });
 
@@ -491,5 +433,10 @@ describe("BLOCKED_DIRECTIONS and PLACEHOLDER_CHAINS consistency", () => {
       expect(src in PLACEHOLDER_CHAINS).toBe(false);
       expect(dst in PLACEHOLDER_CHAINS).toBe(false);
     }
+  });
+
+  it("all directions are live when PLACEHOLDER_CHAINS is empty", () => {
+    expect(Object.keys(PLACEHOLDER_CHAINS)).toHaveLength(0);
+    expect(LIVE_DIRECTIONS).toHaveLength(Object.keys(POLICY_DIRECTION_CHAINS).length);
   });
 });

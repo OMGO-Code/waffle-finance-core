@@ -82,12 +82,7 @@ export const POLICY_DIRECTION_CHAINS: Readonly<
  */
 export const PLACEHOLDER_CHAINS: Readonly<
   Partial<Record<Chain, string>>
-> = {
-  solana:
-    "Solana settlement is not yet implemented — the route will be enabled " +
-    "when the on-chain program and relayer code path are deployed. " +
-    "Use eth_to_xlm or xlm_to_eth for live swaps.",
-} as const;
+> = {} as const;
 
 /**
  * Directions that should be refused even if their chain alignment is correct.

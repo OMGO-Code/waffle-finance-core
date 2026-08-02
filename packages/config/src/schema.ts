@@ -137,6 +137,12 @@ export const relayerConfigSchema = z.object({
     startLedger: z.coerce.number().int().nonnegative().default(0),
     minConfirmations: z.coerce.number().int().positive().default(1),
   }),
+  solana: z.object({
+    rpcUrl: z.string().url().default("https://api.devnet.solana.com"),
+    privateKey: z.string().default(""),
+    programId: z.string().default("PLACEHOLDER"),
+    commitment: z.enum(["processed", "confirmed", "finalized"]).default("confirmed"),
+  }),
   fees: z.object({
     feeRate: z.coerce.number().int().nonnegative().default(50),
     minSwapAmountUSD: z.coerce.number().nonnegative().default(10),

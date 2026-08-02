@@ -130,3 +130,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
     ON audit_log (created_at DESC);
 
+-- ── Chain cursors ─────────────────────────────────────────────────────────────
+-- Tracks the last fully-processed block/ledger/slot per chain so the reconciler
+-- can compute the exact gap between "last seen" and "current tip" after a restart.
+-- `position` uses the native unit for each chain:
+--   ethereum → block number
+--   stellar  → ledger sequence number
+--   solana   → slot number
+-- A missing row means the reconciler has never run for that chain.
+CREATE TABLE IF NOT EXISTS chain_cursors (
+    chain       TEXT    PRIMARY KEY CHECK (chain IN ('ethereum', 'stellar', 'solana')),
+    position    INTEGER NOT NULL DEFAULT 0,
+    updated_at  INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+);
+

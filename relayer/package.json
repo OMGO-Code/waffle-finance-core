@@ -15,6 +15,8 @@
   },
   "dependencies": {
     "@wafflefinance/config": "workspace:*",
+    "@wafflefinance/sdk": "workspace:*",
+    "@solana/web3.js": "^1.98.4",
     "@stellar/stellar-sdk": "^13.0.0",
     "@types/node": "^22.10.0",
     "axios": "^1.10.0",

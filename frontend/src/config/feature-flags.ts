@@ -16,7 +16,7 @@ export type FeatureFlagSet = Readonly<{
   historyStreamEnabled: boolean;
   /** Enable the refund dialog flow. */
   refundFlowEnabled: boolean;
-  /** Enable Solana bridge routes (simulation/announce mode). */
+  /** Enable Solana bridge routes. */
   solanaRoutesEnabled: boolean;
   /** Enable the intro animation on first visit. */
   introAnimationEnabled: boolean;

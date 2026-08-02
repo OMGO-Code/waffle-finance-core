@@ -22,7 +22,7 @@ export function requireFeature(flags: FeatureFlags | undefined, name: keyof Feat
 
 export const FEATURE_FLAG_DESCRIPTIONS: Record<keyof FeatureFlags, { description: string; defaultEnv: string }> = {
   solanaSimulationMode: {
-    description: "Enables Solana simulation/mock mode for testing settlement flows without a real program.",
+    description: "When enabled, forces Solana into simulation/mock mode even when a real program ID is configured. Used for testing.",
     defaultEnv: "false",
   },
   sorobanEarlySupport: {

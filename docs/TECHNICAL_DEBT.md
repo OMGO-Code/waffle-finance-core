@@ -33,22 +33,17 @@ This register tracks architectural debt, known gaps, and planned improvements ac
 
 ## Platform-wide
 
-### TD-000 · Solana activation pending Anchor program deployment 🔴
+### TD-000 · Solana activation pending Anchor program deployment ✅ RESOLVED
 
 **Discovered:** project inception  
-**Location:** `packages/sdk/src/solana/`, `coordinator/src/listeners/solana-listener.ts`, `relayer/src/utils/solana-config.ts`, `resolver/src/listeners/`
+**Resolved:** 2026-07-30  
+**Location:** `packages/sdk/src/solana/`, `coordinator/src/listeners/solana-listener.ts`, `relayer/src/services/solana-contract.ts`
 
 **Context:**  
-The entire Solana leg — SDK client, coordinator listener, relayer integration, resolver settle path, and E2E simulator — is wired end-to-end but deliberately held in simulation mode until the Anchor HTLC program is deployed on devnet. The SDK enters simulation mode whenever `programId` equals `"PLACEHOLDER"` or is empty. The relayer's `logSolanaStatus` detects this and sets the `solana_placeholder_mode` Prometheus gauge.
+The entire Solana leg — SDK client, coordinator listener, relayer integration, and E2E simulator — was wired end-to-end but held in simulation mode until the Anchor HTLC program was deployed on devnet.
 
-**Impact:**  
-SOL swaps are not settled on-chain. The UI exposes the route and records orders, but no actual Solana funds move.
-
-**Next steps:**
-1. Deploy the Anchor HTLC program to Solana devnet.
-2. Set `SOLANA_HTLC_PROGRAM` in coordinator and relayer env.
-3. Run the E2E harness against devnet to validate the full path.
-4. Remove `SolanaHtlcSim` stub and replace with a live-network fixture.
+**Resolution:**  
+The Solana Anchor HTLC program is deployed on devnet. The relayer's `ConfiguredSolanaIntegration` now submits real Solana transactions for lock, claim, and refund operations using the SDK's instruction builders. The coordinator route policy no longer blocks Solana directions. Simulation mode is retained as a fallback when `SOLANA_HTLC_PROGRAM` is unset or a placeholder value.
 
 ---
 

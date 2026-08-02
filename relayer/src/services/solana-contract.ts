@@ -18,6 +18,19 @@
 
 import type { Logger } from "pino";
 import {
+  Connection,
+  Keypair,
+  PublicKey,
+  Transaction,
+  type Commitment,
+} from "@solana/web3.js";
+import {
+  buildCreateOrderInstruction,
+  buildClaimOrderInstruction,
+  buildRefundOrderInstruction,
+  NATIVE_SOL_MINT,
+} from "@wafflefinance/sdk/solana";
+import {
   isSolanaPlaceholder,
   checkSolanaConfig,
   type SolanaConfigStatus,
@@ -57,6 +70,14 @@ export interface SolanaIntegration {
    * @throws {SolanaSubmissionError} on RPC or transaction failures
    */
   submitClaim(params: SolanaClaimParams): Promise<SolanaClaimResult>;
+
+  /**
+   * Submit a refund transaction to reclaim locked funds after timelock expiry.
+   *
+   * @throws {SolanaDisabledError} when in placeholder mode
+   * @throws {SolanaSubmissionError} on RPC or transaction failures
+   */
+  submitRefund(params: SolanaRefundParams): Promise<SolanaRefundResult>;
 
   /**
    * Check whether the integration can handle Solana settlement.
@@ -115,6 +136,22 @@ export interface SolanaClaimResult {
   blockNumber: number;
 }
 
+/** Parameters for refunding a Solana HTLC. */
+export interface SolanaRefundParams {
+  /** Order ID to refund */
+  orderId: string;
+  /** Refunder's address */
+  refunder: string;
+}
+
+/** Result of a successful Solana refund submission. */
+export interface SolanaRefundResult {
+  /** Transaction signature */
+  signature: string;
+  /** Block number/slot where the tx was confirmed */
+  blockNumber: number;
+}
+
 /** Thrown when Solana operations are attempted in placeholder mode. */
 export class SolanaDisabledError extends Error {
   constructor(operation: string) {
@@ -163,59 +200,148 @@ class PlaceholderSolanaIntegration implements SolanaIntegration {
     this.log.warn("Attempted Solana claim submission in placeholder mode");
     throw new SolanaDisabledError("submitClaim");
   }
+
+  async submitRefund(_params: SolanaRefundParams): Promise<SolanaRefundResult> {
+    this.log.warn("Attempted Solana refund submission in placeholder mode");
+    throw new SolanaDisabledError("submitRefund");
+  }
 }
 
 /**
  * Configured implementation: performs real Solana settlement operations.
  * Used when a real program ID is set in the environment.
  *
- * Note: This is a stub implementation. Real Solana RPC integration (Connection,
- * Transaction, sendAndConfirmTransaction) should be added here when the Solana
- * HTLC program is deployed and tested.
+ * Uses the SDK's instruction builders to construct HTLC transactions and
+ * @solana/web3.js to sign and submit them to the network.
  */
 class ConfiguredSolanaIntegration implements SolanaIntegration {
   readonly mode: SolanaConfigStatus = "configured";
+  private readonly connection: Connection;
+  private readonly keypair: Keypair;
+  private readonly programPk: PublicKey;
+  private readonly commitment: Commitment;
 
   constructor(
     readonly programId: string,
     private readonly log: Logger,
-    private readonly rpcUrl: string
-  ) {}
+    private readonly rpcUrl: string,
+    privateKey: string,
+    commitment: Commitment = "confirmed"
+  ) {
+    this.programPk = new PublicKey(programId);
+    this.commitment = commitment;
+    this.connection = new Connection(rpcUrl, commitment);
+
+    // Parse the private key — supports both base-58 and hex formats.
+    let secretKey: Uint8Array;
+    if (privateKey.startsWith("[")) {
+      // JSON array format: [1,2,3,...]
+      secretKey = new Uint8Array(JSON.parse(privateKey));
+    } else if (privateKey.startsWith("0x")) {
+      // Hex format: 0x...
+      const hex = privateKey.slice(2);
+      secretKey = new Uint8Array(Buffer.from(hex, "hex"));
+    } else {
+      // Base-58 format
+      secretKey = Uint8Array.from(
+        Buffer.from(privateKey, "base58")
+      );
+    }
+    this.keypair = Keypair.fromSecretKey(secretKey);
+  }
 
   isEnabled(): boolean {
     return true;
   }
 
   validateAddress(address: string): boolean {
-    // Real Solana address validation: base58 string, 32-44 chars
-    // In production, use PublicKey.isOnCurve or similar from @solana/web3.js
-    return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address);
+    try {
+      new PublicKey(address);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async submitLock(params: SolanaLockParams): Promise<SolanaLockResult> {
+    const hashlockHex = params.hashlock.startsWith("0x")
+      ? params.hashlock
+      : `0x${params.hashlock}`;
+    const hashlockBytes = Buffer.from(hashlockHex.slice(2), "hex");
+    const mint = params.tokenMint ?? NATIVE_SOL_MINT;
+    const timelockAbsolute = params.timelock;
+
     this.log.info(
       {
         programId: this.programId,
         beneficiary: params.beneficiary,
         amount: params.amount.toString(),
         hashlock: params.hashlock,
+        timelock: timelockAbsolute,
+        payer: this.keypair.publicKey.toBase58(),
       },
       "Submitting Solana lock transaction"
     );
 
-    // TODO: Implement real Solana transaction submission
-    // 1. Construct instruction for the HTLC program
-    // 2. Build and sign transaction
-    // 3. Submit to RPC and wait for confirmation
-    // 4. Return signature + block number
-
-    throw new SolanaSubmissionError(
-      "Solana lock submission is not yet implemented. " +
-      "This is a typed contract stub awaiting HTLC program deployment."
+    const { instruction, orderPda } = buildCreateOrderInstruction(
+      this.programPk,
+      {
+        payer: this.keypair.publicKey,
+        beneficiary: new PublicKey(params.beneficiary),
+        refundAddress: new PublicKey(params.refundAddress),
+        mint: new PublicKey(mint),
+        amount: params.amount,
+        safetyDeposit: BigInt(0),
+        hashlockBytes,
+        timelockAbsolute,
+      }
     );
+
+    try {
+      const { blockhash } = await this.connection.getLatestBlockhash(
+        this.commitment
+      );
+      const tx = new Transaction({
+        recentBlockhash: blockhash,
+        feePayer: this.keypair.publicKey,
+      });
+      tx.add(instruction);
+      tx.partialSign(this.keypair);
+
+      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      await this.connection.confirmTransaction(sig, this.commitment);
+
+      const slot = await this.connection.getSlot(this.commitment);
+
+      this.log.info(
+        { signature: sig, orderId: orderPda.toBase58(), slot },
+        "Solana lock transaction confirmed"
+      );
+
+      return {
+        signature: sig,
+        orderId: orderPda.toBase58(),
+        blockNumber: slot,
+      };
+    } catch (err) {
+      this.log.error({ err, hashlock: params.hashlock }, "Solana lock submission failed");
+      throw new SolanaSubmissionError(
+        `Solana lock submission failed: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
   }
 
   async submitClaim(params: SolanaClaimParams): Promise<SolanaClaimResult> {
+    const preimageHex = params.preimage.startsWith("0x")
+      ? params.preimage
+      : `0x${params.preimage}`;
+    const preimageBytes = Buffer.from(preimageHex.slice(2), "hex");
+    const orderPda = new PublicKey(params.orderId);
+
     this.log.info(
       {
         programId: this.programId,
@@ -225,16 +351,103 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
       "Submitting Solana claim transaction"
     );
 
-    // TODO: Implement real Solana claim submission
-    // 1. Construct claim instruction with preimage
-    // 2. Build and sign transaction
-    // 3. Submit to RPC and wait for confirmation
-    // 4. Return signature + block number
+    const ix = buildClaimOrderInstruction(this.programPk, {
+      claimer: this.keypair.publicKey,
+      orderPda,
+      beneficiaryAccount: this.keypair.publicKey,
+      preimageBytes,
+    });
 
-    throw new SolanaSubmissionError(
-      "Solana claim submission is not yet implemented. " +
-      "This is a typed contract stub awaiting HTLC program deployment."
+    try {
+      const { blockhash } = await this.connection.getLatestBlockhash(
+        this.commitment
+      );
+      const tx = new Transaction({
+        recentBlockhash: blockhash,
+        feePayer: this.keypair.publicKey,
+      });
+      tx.add(ix);
+      tx.partialSign(this.keypair);
+
+      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      await this.connection.confirmTransaction(sig, this.commitment);
+
+      const slot = await this.connection.getSlot(this.commitment);
+
+      this.log.info(
+        { signature: sig, orderId: params.orderId, slot },
+        "Solana claim transaction confirmed"
+      );
+
+      return {
+        signature: sig,
+        blockNumber: slot,
+      };
+    } catch (err) {
+      this.log.error({ err, orderId: params.orderId }, "Solana claim submission failed");
+      throw new SolanaSubmissionError(
+        `Solana claim submission failed: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
+  }
+
+  async submitRefund(params: SolanaRefundParams): Promise<SolanaRefundResult> {
+    const orderPda = new PublicKey(params.orderId);
+
+    this.log.info(
+      {
+        programId: this.programId,
+        orderId: params.orderId,
+        refunder: params.refunder,
+      },
+      "Submitting Solana refund transaction"
     );
+
+    const ix = buildRefundOrderInstruction(this.programPk, {
+      refunder: this.keypair.publicKey,
+      orderPda,
+      refundAccount: this.keypair.publicKey,
+    });
+
+    try {
+      const { blockhash } = await this.connection.getLatestBlockhash(
+        this.commitment
+      );
+      const tx = new Transaction({
+        recentBlockhash: blockhash,
+        feePayer: this.keypair.publicKey,
+      });
+      tx.add(ix);
+      tx.partialSign(this.keypair);
+
+      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false,
+        maxRetries: 3,
+      });
+      await this.connection.confirmTransaction(sig, this.commitment);
+
+      const slot = await this.connection.getSlot(this.commitment);
+
+      this.log.info(
+        { signature: sig, orderId: params.orderId, slot },
+        "Solana refund transaction confirmed"
+      );
+
+      return {
+        signature: sig,
+        blockNumber: slot,
+      };
+    } catch (err) {
+      this.log.error({ err, orderId: params.orderId }, "Solana refund submission failed");
+      throw new SolanaSubmissionError(
+        `Solana refund submission failed: ${err instanceof Error ? err.message : String(err)}`,
+        err
+      );
+    }
   }
 }
 
@@ -246,12 +459,16 @@ class ConfiguredSolanaIntegration implements SolanaIntegration {
  * @param programId - The Solana HTLC program address (from env)
  * @param log - Pino logger instance
  * @param rpcUrl - Solana RPC URL (only used when configured)
+ * @param privateKey - Solana private key for signing (only used when configured)
+ * @param commitment - Solana commitment level (default: "confirmed")
  * @returns SolanaIntegration instance (placeholder or configured)
  */
 export function createSolanaIntegration(
   programId: string | undefined,
   log: Logger,
-  rpcUrl: string
+  rpcUrl: string,
+  privateKey?: string,
+  commitment: Commitment = "confirmed"
 ): SolanaIntegration {
   const status = checkSolanaConfig(programId);
 
@@ -264,11 +481,18 @@ export function createSolanaIntegration(
   }
 
   // status === "configured"
+  if (!privateKey) {
+    log.warn(
+      "Solana program is configured but SOLANA_PRIVATE_KEY is not set. " +
+      "Solana settlement operations will fail at runtime."
+    );
+  }
+
   log.info(
     { programId, rpcUrl },
     "Solana integration is CONFIGURED: Solana settlement is enabled."
   );
-  return new ConfiguredSolanaIntegration(programId!, log, rpcUrl);
+  return new ConfiguredSolanaIntegration(programId!, log, rpcUrl, privateKey ?? "", commitment);
 }
 
 /**

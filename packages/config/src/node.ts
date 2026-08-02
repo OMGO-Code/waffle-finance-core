@@ -198,6 +198,12 @@ export function loadRelayerConfig(
       startLedger: rawEnv.START_LEDGER_STELLAR ?? "0",
       minConfirmations: rawEnv.STELLAR_MIN_CONFIRMATIONS ?? "1",
     },
+    solana: {
+      rpcUrl: rawEnv.SOLANA_RPC_URL ?? (isMainnet ? "https://api.mainnet-beta.solana.com" : "https://api.devnet.solana.com"),
+      privateKey: rawEnv.SOLANA_PRIVATE_KEY ?? "",
+      programId: rawEnv.SOLANA_HTLC_PROGRAM ?? rawEnv.SOLANA_HTLC_PROGRAM_TESTNET ?? rawEnv.SOLANA_HTLC_PROGRAM_MAINNET ?? "PLACEHOLDER",
+      commitment: (rawEnv.SOLANA_COMMITMENT as "processed" | "confirmed" | "finalized") ?? "confirmed",
+    },
     fees: {
       feeRate: rawEnv.RELAYER_FEE_RATE ?? "50",
       minSwapAmountUSD: rawEnv.MIN_SWAP_AMOUNT_USD ?? "10",
@@ -245,8 +251,11 @@ export function loadRelayerConfig(
       resolverRegistry:
         rawEnv[isMainnet ? "ETH_RESOLVER_REGISTRY_MAINNET" : "ETH_RESOLVER_REGISTRY_TESTNET"] ?? null,
     },
-    // Relayer does not interact with Solana directly.
-    solana: { programId: null },
+    // Relayer uses Solana for direct settlement when configured.
+    solana: {
+      programId: relayCfg.solana.programId,
+      rpcUrl: relayCfg.solana.rpcUrl,
+    },
   };
   const relayerChainResult = validateSorobanChainConfig(relayerChainInput);
 
